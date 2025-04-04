@@ -1,0 +1,359 @@
+---
+title: "GSoC 2025 - ruptures tests"
+author: "Minh Long Nguyen"
+date: "2025-04-04"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+library("Rcpp")
+library("RcppArmadillo")
+library("microbenchmark")
+library("ggplot2")
+library("microbenchmark")
+knitr::opts_chunk$set(echo = TRUE)
+Rcpp::sourceCpp("effEval.cpp")
+knitr::opts_chunk$set(engine.path = list(
+  Rcpp = system.file(package = "Rcpp")
+))
+```
+
+This document presents the solutions to the tests provided in [the ruptures project,](https://github.com/rstats-gsoc/gsoc2025/wiki/ruptures-for-change-point-detection) part of the Google Summer of Code program for 2025. The working files, including both R and C++ scripts, are included in the accompanying folder and should be regarded as supplementary materials.
+
+For the sake of this work, we count from 0, not 1.
+
+## Easy test
+
+In this task, we are given a 2D array $X$ of size $T \times D$ and are expected to produce a cumulative sum matrix (by row) named $Y$, such that:
+
+1.  $Y_0 = 0^D$
+2.  $Y_i = \sum_{j < i} Y_j, \; i = 1,...,D$
+
+#### Cpp code  
+  
+We first initialize a cumulative sum (cumsum) matrix of size $(T+1)\times D$, filled with zeros. Then, we iteratively compute cumulative sums, reusing the output from the previous iteration to improve efficiency. 
+
+The C++ solution is given below.
+
+```{Rcpp, eval=FALSE}
+arma::mat Cpp_getCumsum(const arma::mat& X) {
+  
+  int nr = X.n_rows;
+  int nc = X.n_cols;
+  
+  arma::mat CumsumMat(nr+1, nc, arma::fill::zeros);
+  
+  for(int i=0; i<nr; i++) {
+    
+    CumsumMat.row(i+1) = CumsumMat.row(i) + X.row(i); 
+    //use output from previous iteration for efficiency
+    
+  }
+  return CumsumMat;
+} 
+```
+#### Testing and benchmarking  
+  
+The function is wrapped using RcppArmadillo for interfacing with R. A \text{generally vectorised} R function, R_getCumsum(), that does the same computation is prepared for comparision purposes.
+
+```{r pressure, echo=FALSE}
+
+R_getCumsum = function(X){
+  
+  nr = nrow(X)
+  nc = ncol(X)
+  CumsumMat = matrix(nrow = nr+1, ncol = nc, data = 0)
+  CumsumMat[2:(nr+1),] = apply(X, 2, cumsum)
+  
+  return(CumsumMat)
+}
+
+```
+
+We simulate an $1000\times100$ matrix $X$ whose values come from i.i.d. standard Gaussian distributions. 
+
+```{r}
+set.seed(1)
+X = matrix(rnorm(10^5), nrow = 1000)
+```
+
+The outputs of Cpp_getCumsum() and R_getCumsum() on $X$ are compared.
+
+```{r}
+all.equal(R_getCumsum(X), Cpp_getCumsum(X))
+```
+
+Good news! They are equal. What about computational cost?
+
+We can use the microbenchmark package in R to compare the runtimes.
+
+```{r}
+microbenchmark(R_getCumsum = R_getCumsum(X),
+               Cpp_getCumsum = Cpp_getCumsum(X))
+```
+
+Cpp_getCumsum() is 4-6 times faster than R_getCumsum().
+
+## Medium test  
+  
+In this task, we are required to compute this function $f(i', j)$, where $i'$ is the starting index, $j$ is the ending index, and
+
+$$
+f(i',j) = \sum_{i=i'}^{j-1} \big|X_i - m\big|^2,
+$$
+
+where $|\cdot|$ is the Euclidean norm operator, and $m$ is the centroid of the set $\{X_k\}_{k \in i':(j-1)}$. This can be viewed as the total squared Euclidean distance between all data points in a cluster and its centroid $m$ ($k$-means clustering!!!). 
+
+A simple approach to compute $f(i', j)$ is as follows:
+
+\begin{enumerate}
+    \item Compute the centroid $m$ of $\{X_k\}_{k \in i':(j+1)}$.
+    \item Calculate the squared Euclidean distance from each data point to $m$ and return the total.
+\end{enumerate}
+
+The following Cpp program implements this approach. We create a class \textbf{Cost} operating on arma::mat objects as required by the task. The method eval() compute $f(i',j)$.
+
+
+```{Rcpp, eval=FALSE}
+
+class Cost {
+private:
+  arma::mat X; 
+  
+public:
+  
+  Cost(const arma::mat& inputMat) { //initialise a Cost object
+    X = inputMat;
+  }
+  
+  
+  double Cpp_Eval(int start, int end) const {  //no precomputation
+    
+    int nc = X.n_cols;
+    int ncr = end - start;
+    arma::rowvec sumX =  arma::zeros<arma::rowvec>(nc);
+    
+    for(int i=start; i<end; i++) {
+      sumX = sumX + X.row(i);  
+    }
+    
+    arma::rowvec meanX = sumX/ncr;
+    
+    double error = 0;
+    double eucldist;
+    for(int i=start; i<end; i++) {
+      eucldist = arma::norm(X.row(i) - meanX, 2);
+      error = error + std::pow(eucldist, 2);
+    }
+    
+    return error;
+  }
+  
+};
+
+```
+
+RCPP_MODULE() allows us to use the class Cost in R with object Cpp_Eval.
+
+```{Rcpp, eval=FALSE}
+RCPP_MODULE(mod_Cost) { 
+  class_<Cost>( "Cost")
+  .constructor<arma::mat>()
+  .method( "Cpp_Eval", &Cost::Cpp_Eval)
+  ;
+}
+```
+
+#### Testing    
+   
+We then create a \text{generally vectorised} R function called R_eval() that does the same computation for comparision purposes.
+
+```{r}
+R_eval = function(X, start, end){
+  R_start = start+1
+  R_end = end
+  
+  Xe = X[R_start:R_end,]
+  cMXe = colMeans(Xe)
+  
+  return(sum(sweep(Xe, 2, cMXe, FUN = "-")^2))
+}
+```
+
+Let's create an object and compare the results by trying to calculate the distance from all data points in the matrix to the centroid
+
+```{r}
+Xnew = new(Cost, X) #Cpp object
+all.equal(R_eval(X,0, 1000), Xnew$Cpp_Eval(0, 1000))
+```
+
+Good news! They give equal results. What about runtimes? We will come back to that later.
+
+## Hard test
+
+Our task is to compute $f(i',j)$ in constant time.
+
+Is that even possible?
+
+Each $k$-means iteration would be done in $\mathcal{O}(k)$ times. That's great news.
+
+...Yes and no...
+
+Yes, we can pre-compute some quantities and then easily compute $f(i',j)$ in constant time.  
+  
+And no, unfortunately, these quantities are computed in linear time.  
+  
+There is no free lunch.  
+  
+We won't go into much detail about these pre-computed quantities as they have been described in [this GSoC wikipage.](https://github.com/rstats-gsoc/gsoc2025/wiki/ruptures-for-change-point-detection).
+
+The computations described in [this](https://github.com/rstats-gsoc/gsoc2025/wiki/ruptures-for-change-point-detection) are similar to this well-known equation:
+
+$$
+\mathbb{V}[X] = \mathbb{E}[X^2] - \mathbb{E}[X]^2.
+$$
+
+In theory if you know $\mathbb{E}[X^2]$ and $\mathbb{E}[X]$, then you also know $\mathbb{V}[X]$.
+
+Obviously, we don't know these quantities in most applications (except for toy examples).
+
+We can more or less do the same thing here, i.e., pre-computing quantities sharing similar information as $\mathbb{E}[X^{2}]$ and $\mathbb{E}[X]$. These are $\text{getCumsum}(X_{0:T})$ and $\text{getCumsum}(X_{0:T}^{2})$. These can be pre-computed and saved as attributes of a \textbf{Cost object. 
+
+That results in the Cpp_effEval() function, which is described in the following Cpp program, which also contains solutions to the previous two tests, as we merge them into a single Cpp file.
+
+
+#### Cpp code - final  
+  
+```{Rcpp, eval=FALSE}
+
+// [[Rcpp::depends(RcppArmadillo)]]
+
+// [[Rcpp::export]]
+arma::mat Cpp_getCumsum(const arma::mat& X) {
+  
+  int nr = X.n_rows;
+  int nc = X.n_cols;
+  
+  arma::mat CumsumMat(nr+1, nc, arma::fill::zeros);
+  
+  for(int i=0; i<nr; i++) {
+    
+    CumsumMat.row(i+1) = CumsumMat.row(i) + X.row(i); 
+    //use output from previous iteration for efficiency
+    
+  }
+  
+  return CumsumMat;
+  
+} 
+
+class Cost {
+private:
+  arma::mat X; 
+  arma::mat CSX; //cumsum(X)
+  arma::mat CSXsq; //cumsum(Xsq)
+  
+public:
+  
+  Cost(const arma::mat& inputMat) { //initialise a Cost object
+    X = inputMat;
+    CSX = Cpp_getCumsum(inputMat);
+    CSXsq = Cpp_getCumsum(arma::pow(inputMat, 2));
+  }
+  
+  
+  double Cpp_Eval(int start, int end) const {  //no precomputation
+    
+    int nc = X.n_cols;
+    int ncr = end - start;
+    arma::rowvec sumX =  arma::zeros<arma::rowvec>(nc);
+    
+    for(int i=start; i<end; i++) {
+      sumX = sumX + X.row(i);  
+    }
+    
+    arma::rowvec meanX = sumX/ncr;
+    
+    double error = 0;
+    double eucldist;
+    for(int i=start; i<end; i++) {
+      eucldist = arma::norm(X.row(i) - meanX, 2);
+      error = error + std::pow(eucldist, 2);
+    }
+    
+    return error;
+  }
+  
+   
+  double Cpp_effEval(int start, int end) const {  //use precomputation
+    
+    int ncr = end - start;
+    double errsumXsq =  arma::sum(CSXsq.row(end) - CSXsq.row(start));
+    double sqerrsumX =  std::pow(arma::norm(CSX.row(end) - CSX.row(start),2), 2);
+    
+    return errsumXsq - sqerrsumX/ncr;
+    
+  }
+  
+};
+
+RCPP_MODULE(mod_Cost) {  //to use the class Cost in R
+  class_<Cost>( "Cost")
+  .constructor<arma::mat>()
+  .method( "Cpp_Eval", &Cost::Cpp_Eval)
+  .method( "Cpp_effEval", &Cost::Cpp_effEval)
+  ;
+}
+
+```
+
+#### Testing and benchmarking  
+  
+We can check whether or not Cpp_effEval() give the same results as R_eval() and Cpp_Eval(). 
+
+```{r}
+Xnew = new(Cost, X)
+all.equal(R_eval(X, 0, 1000), Xnew$Cpp_Eval(0, 1000), Xnew$Cpp_effEval(0, 1000))
+
+```
+
+Great news! The results are the same.
+
+
+#### Benchmarking
+
+We will vary the number of rows $n \in \{1000, 10000, 10000, 100000\}$. These datasets are simulated using the same methodology where the number of columns is 100.
+
+```{r, include=T}
+runtime = read.csv("./runtime.csv") #load the benchmarking results (see runtime_eval())
+
+ggplot(runtime, aes(x = n, y = runtime, group = method, color = method)) +
+  geom_line() +
+  geom_point() + 
+  scale_x_log10() +  
+  scale_y_log10() +  
+  labs(
+    title = "Runtime benchmarking (log-log scale)",
+    x = "Number of rows (n)",
+    y = "Median runtime (micro-seconds)"
+  ) +
+  theme_minimal() +
+  theme(legend.title = element_blank()) 
+
+
+```
+
+We can conclude that our efficient effEval function achieves a constant runtime complexity as the log-log plot of median runtime vs. $n$ appears to be a near-constant line.
+
+However,
+
+there is no free lunch.
+
+No one will give us $\text{getCumsum}(X_{0:T})$ and $\text{getCumsum}(X_{0:T}^{2})$ for free.
+  
+The design of the \text{Cost} class is mostly useful in the scenarios where multiple computations rely on these pre-computed matrices.
+
+This's the end of my work. Thanks for your time!
