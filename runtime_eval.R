@@ -3,19 +3,19 @@ Rcpp::sourceCpp("effEval.cpp")
 
 set.seed(1)
 n2 = 100
-X2 = matrix(rnorm(n*100), ncol = 100)
+X2 = matrix(rnorm(n2*100), ncol = 100)
 X2new = new(Cost, X2)
 
 n3 = 1000
-X3 = matrix(rnorm(n*100), ncol = 100)
+X3 = matrix(rnorm(n3*100), ncol = 100)
 X3new = new(Cost, X3)
 
 n4 = 10000
-X4 = matrix(rnorm(n*100), ncol = 100)
+X4 = matrix(rnorm(n4*100), ncol = 100)
 X4new = new(Cost, X4)
 
 n5 = 100000
-X5 = matrix(rnorm(n*100), ncol = 100)
+X5 = matrix(rnorm(n5*100), ncol = 100)
 X5new = new(Cost, X5)
 
 microbenchmark::microbenchmark(R_eval(X2, 0, n2),
@@ -26,7 +26,7 @@ microbenchmark::microbenchmark(R_eval(X2, 0, n2),
                                X3new$Cpp_Eval(0,n3),
                                R_eval(X4, 0, n4),
                                X4new$Cpp_effEval(0,n4),
-                               X4new$Cpp_Eval(0,n5),
+                               X4new$Cpp_Eval(0,n4),
                                R_eval(X5, 0, n5),
                                X5new$Cpp_effEval(0,n5),
                                X5new$Cpp_Eval(0,n5),
